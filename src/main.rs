@@ -66,10 +66,10 @@ fn main() -> ! {
     let mut leds: [RGB8; STRIP_LEN] = [(0, 0, 0).into(); STRIP_LEN];
     let mut t = 0.0;
 
-    let strip_brightness = 64u8; // Limit brightness to 64/256 (25%)
+    let strip_brightness = 128u8; // Limit brightness to 64/256 (25%)
 
     // Slow down timer by this factor (0.1 will result in 10 seconds):
-    let animation_speed = 0.1;
+    let animation_speed = 0.2;
 
     loop {
         for (_i, led) in leds.iter_mut().enumerate() {
@@ -77,9 +77,9 @@ fn main() -> ! {
             // Bring -1..1 sine range to 0..1 range:
             let sin_01 = (sin_11 + 1.0) * 0.5;
 
-            let hue = 360.0 * sin_01;
+            let hue = 215_f32;
             let sat = 1.0;
-            let val = 1.0;
+            let val = sin_01;
 
             let rgb = hsv2rgb_u8(hue, sat, val);
             *led = rgb.into();
