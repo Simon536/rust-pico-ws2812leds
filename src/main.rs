@@ -1,6 +1,17 @@
+//! Pinouts:
+//! * GPIO 0 - UART TX (out of the RP2040)
+//! * GPIO 1 - UART RX (in to the RP2040)
+//! * GPIO 16 - WS2812 Data
+
 #![no_std]
 #![no_main]
 
+use core::cell::RefCell;
+use core::fmt::Write;
+//use cortex_m::interrupt::Mutex;
+use embedded_hal::{digital::v2::OutputPin, serial::Write as UartWrite};
+use fugit::RateExtU32;
+use hal::gpio::FunctionUart;
 use panic_halt as _;
 use rp_pico::entry;
 use rp_pico::hal;
@@ -11,7 +22,31 @@ use rp_pico::hal::timer::Timer;
 use smart_leds::{brightness, SmartLedsWrite, RGB8};
 use ws2812_pio::Ws2812;
 
+use pac::interrupt;
+
+use critical_section::Mutex;
+use hal::gpio::pin::bank0::{Gpio0, Gpio1};
+use hal::uart::{DataBits, StopBits, UartConfig};
+use heapless::spsc::Queue;
+
+type UartPins = (
+    hal::gpio::Pin<Gpio0, hal::gpio::Function<hal::gpio::Uart>>,
+    hal::gpio::Pin<Gpio1, hal::gpio::Function<hal::gpio::Uart>>,
+);
+type Uart = hal::uart::UartPeripheral<hal::uart::Enabled, pac::UART0, UartPins>;
+
+struct UartQueue {
+    mutex_cell_queue: Mutex<RefCell<Queue<u8, 64>>>,
+    interrupt: pac::Interrupt,
+}
+
 const STRIP_LEN: usize = 8;
+
+static GLOBAL_UART: Mutex<RefCell<Option<Uart>>> = Mutex::new(RefCell::new(None));
+static UART_TX_QUEUE: UartQueue = UartQueue {
+    mutex_cell_queue: Mutex::new(RefCell::new(Queue::new())),
+    interrupt: hal::pac::Interrupt::UART0_IRQ,
+};
 
 #[entry]
 fn main() -> ! {
@@ -42,8 +77,30 @@ fn main() -> ! {
         &mut pac.RESETS,
     );
 
+    let uart_pins = (
+        pins.gpio0.into_mode::<hal::gpio::FunctionUart>(),
+        pins.gpio1.into_mode::<hal::gpio::FunctionUart>(),
+    );
+
+    let mut uart = hal::uart::UartPeripheral::new(pac.UART0, uart_pins, &mut pac.RESETS)
+        .enable(
+            UartConfig::new(9600.Hz(), DataBits::Eight, None, StopBits::One),
+            clocks.peripheral_clock.freq(),
+        )
+        .unwrap();
+
     let mut frame_delay =
         cortex_m::delay::Delay::new(core.SYST, clocks.system_clock.freq().to_Hz());
+
+    // Raise interrupt when TX FIFO has space
+    uart.enable_tx_interrupt();
+
+    critical_section::with(|cs| {
+        GLOBAL_UART.borrow(cs).replace(Some(uart));
+    });
+
+    let mut led_pin = pins.led.into_push_pull_output();
+    led_pin.set_high().unwrap();
 
     // Import sine function
     let sin = hal::rom_data::float_funcs::fsin::ptr();
@@ -85,6 +142,8 @@ fn main() -> ! {
             *led = rgb.into();
         }
 
+        //writeln!(&UART_TX_QUEUE, "Color: {:?}", leds.iter().take(1)).unwrap();
+
         ws.write(brightness(leds.iter().copied(), strip_brightness))
             .unwrap();
 
@@ -95,6 +154,71 @@ fn main() -> ! {
         while t > 1.0 {
             t -= 1.0;
         }
+    }
+}
+
+impl UartQueue {
+    fn read_byte(&self) -> Option<u8> {
+        critical_section::with(|cs| {
+            let cell_queue = self.mutex_cell_queue.borrow(cs);
+            let mut queue = cell_queue.borrow_mut();
+            queue.dequeue()
+        })
+    }
+
+    fn peek_byte(&self) -> Option<u8> {
+        critical_section::with(|cs| {
+            let cell_queue = self.mutex_cell_queue.borrow(cs);
+            let queue = cell_queue.borrow_mut();
+            queue.peek().cloned()
+        })
+    }
+
+    fn write_bytes_blocking(&self, data: &[u8]) {
+        // Go through all the bytes we need to write.
+        for byte in data.iter() {
+            // Keep trying until there is space in the queue. But release the
+            // mutex between each attempt, otherwise the IRQ will never run
+            // and we will never have space!
+            let mut written = false;
+            while !written {
+                // Grab the mutex, by turning interrupts off. NOTE: This
+                // doesn't work if you are using Core 1 as we only turn
+                // interrupts off on one core.
+                critical_section::with(|cs| {
+                    // Grab the mutex contents.
+                    let cell_queue = self.mutex_cell_queue.borrow(cs);
+                    // Grab mutable access to the queue. This can't fail
+                    // because there are no interrupts running.
+                    let mut queue = cell_queue.borrow_mut();
+                    // Try and put the byte in the queue.
+                    if queue.enqueue(*byte).is_ok() {
+                        // It worked! We must have had space.
+                        if !pac::NVIC::is_enabled(self.interrupt) {
+                            unsafe {
+                                // Now enable the UART interrupt in the *Nested
+                                // Vectored Interrupt Controller*, which is part
+                                // of the Cortex-M0+ core. If the FIFO has space,
+                                // the interrupt will run as soon as we're out of
+                                // the closure.
+                                pac::NVIC::unmask(self.interrupt);
+                                // We also have to kick the IRQ in case the FIFO
+                                // was already below the threshold level.
+                                pac::NVIC::pend(self.interrupt);
+                            }
+                        }
+                        written = true;
+                    }
+                });
+            }
+        }
+    }
+}
+
+impl core::fmt::Write for &UartQueue {
+    fn write_str(&mut self, data: &str) -> core::fmt::Result {
+        self.write_bytes_blocking(data.as_bytes());
+        Ok(())
     }
 }
 
@@ -128,4 +252,45 @@ pub fn hsv2rgb_u8(h: f32, s: f32, v: f32) -> (u8, u8, u8) {
         (r.1 * 255.0) as u8,
         (r.2 * 255.0) as u8,
     )
+}
+
+#[interrupt]
+fn UART0_IRQ() {
+    // This variable is special. It gets mangled by the `#[interrupt]` macro
+    // into something that we can access without the `unsafe` keyword. It can
+    // do this because this function cannot be called re-entrantly. We know
+    // this because the function's 'real' name is unknown, and hence it cannot
+    // be called from the main thread. We also know that the NVIC will not
+    // re-entrantly call an interrupt.
+    static mut UART: Option<hal::uart::UartPeripheral<hal::uart::Enabled, pac::UART0, UartPins>> =
+        None;
+
+    // This is one-time lazy initialisation. We steal the variable given to us
+    // via `GLOBAL_UART`.
+    if UART.is_none() {
+        critical_section::with(|cs| {
+            *UART = GLOBAL_UART.borrow(cs).take();
+        });
+    }
+
+    // Check if we have a UART to work with
+    if let Some(uart) = UART {
+        // Check if we have data to transmit
+        while let Some(byte) = UART_TX_QUEUE.peek_byte() {
+            if uart.write(byte).is_ok() {
+                // The UART took it, so pop it off the queue.
+                let _ = UART_TX_QUEUE.read_byte();
+            } else {
+                break;
+            }
+        }
+
+        if UART_TX_QUEUE.peek_byte().is_none() {
+            pac::NVIC::mask(hal::pac::Interrupt::UART0_IRQ);
+        }
+    }
+
+    // Set an event to ensure the main thread always wakes up, even if it's in
+    // the process of going to sleep.
+    cortex_m::asm::sev();
 }
