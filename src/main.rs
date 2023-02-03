@@ -7,11 +7,13 @@
 #![no_main]
 
 use core::cell::RefCell;
+use cortex_m::prelude::_embedded_hal_serial_Read;
 use core::fmt::Write;
+use core::str::from_utf8;
 //use cortex_m::interrupt::Mutex;
 use embedded_hal::{digital::v2::OutputPin, serial::Write as UartWrite};
 use fugit::RateExtU32;
-use hal::gpio::FunctionUart;
+//use hal::gpio::FunctionUart;
 use panic_halt as _;
 use rp_pico::entry;
 use rp_pico::hal;
@@ -44,6 +46,10 @@ const STRIP_LEN: usize = 8;
 
 static GLOBAL_UART: Mutex<RefCell<Option<Uart>>> = Mutex::new(RefCell::new(None));
 static UART_TX_QUEUE: UartQueue = UartQueue {
+    mutex_cell_queue: Mutex::new(RefCell::new(Queue::new())),
+    interrupt: hal::pac::Interrupt::UART0_IRQ,
+};
+static UART_RX_QUEUE: UartQueue = UartQueue {
     mutex_cell_queue: Mutex::new(RefCell::new(Queue::new())),
     interrupt: hal::pac::Interrupt::UART0_IRQ,
 };
@@ -92,6 +98,13 @@ fn main() -> ! {
     let mut frame_delay =
         cortex_m::delay::Delay::new(core.SYST, clocks.system_clock.freq().to_Hz());
 
+    unsafe {
+        // Enable UART interrupt in the NVIC (Nested Vectored Interrupt Controller)
+        pac::NVIC::unmask(hal::pac::Interrupt::UART0_IRQ);
+    }
+
+    uart.enable_rx_interrupt();
+
     // Raise interrupt when TX FIFO has space
     uart.enable_tx_interrupt();
 
@@ -123,7 +136,7 @@ fn main() -> ! {
     let mut leds: [RGB8; STRIP_LEN] = [(0, 0, 0).into(); STRIP_LEN];
     let mut t = 0.0;
 
-    let strip_brightness = 128u8; // Limit brightness to 64/256 (25%)
+    let strip_brightness = 128u8; // Limit brightness to 128/256 (50%)
 
     // Slow down timer by this factor (0.1 will result in 10 seconds):
     let animation_speed = 0.2;
@@ -285,6 +298,12 @@ fn UART0_IRQ() {
             }
         }
 
+        // Check if we have data to receive
+        while let Ok(byte) = uart.read() {
+            write!(&UART_RX_QUEUE, "{}", from_utf8(&[byte]).unwrap()).unwrap();
+        }
+
+        // Clear UART interrupt flag
         if UART_TX_QUEUE.peek_byte().is_none() {
             pac::NVIC::mask(hal::pac::Interrupt::UART0_IRQ);
         }
