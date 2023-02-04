@@ -7,9 +7,9 @@
 #![no_main]
 
 use core::cell::RefCell;
-use cortex_m::prelude::_embedded_hal_serial_Read;
 use core::fmt::Write;
 use core::str::from_utf8;
+use cortex_m::prelude::_embedded_hal_serial_Read;
 //use cortex_m::interrupt::Mutex;
 use embedded_hal::{digital::v2::OutputPin, serial::Write as UartWrite};
 use fugit::RateExtU32;
@@ -141,21 +141,32 @@ fn main() -> ! {
     // Slow down timer by this factor (0.1 will result in 10 seconds):
     let animation_speed = 0.2;
 
+    let mut hue: f32 = 215.0;
+
     loop {
+        write!(&UART_TX_QUEUE, " ").unwrap();
+        if UART_RX_QUEUE.peek_byte().is_some() {
+            hue += 10.0;
+            if hue > 360.0 {
+                hue -= 360.0
+            };
+
+            let _ = UART_RX_QUEUE.read_byte();
+            writeln!(&UART_TX_QUEUE, "Hue is now {hue}").unwrap();
+        }
+
         for (_i, led) in leds.iter_mut().enumerate() {
             let sin_11 = sin(t * 2.0 * core::f32::consts::PI);
             // Bring -1..1 sine range to 0..1 range:
             let sin_01 = (sin_11 + 1.0) * 0.5;
 
-            let hue = 215_f32;
+            //hue = 215_f32;
             let sat = 1.0;
             let val = sin_01;
 
             let rgb = hsv2rgb_u8(hue, sat, val);
             *led = rgb.into();
         }
-
-        //writeln!(&UART_TX_QUEUE, "Color: {:?}", leds.iter().take(1)).unwrap();
 
         ws.write(brightness(leds.iter().copied(), strip_brightness))
             .unwrap();
@@ -298,14 +309,14 @@ fn UART0_IRQ() {
             }
         }
 
+        // Mask UART interrupt flag
+        if UART_TX_QUEUE.peek_byte().is_none() {
+            pac::NVIC::mask(hal::pac::Interrupt::UART0_IRQ);
+        }
+
         // Check if we have data to receive
         while let Ok(byte) = uart.read() {
             write!(&UART_RX_QUEUE, "{}", from_utf8(&[byte]).unwrap()).unwrap();
-        }
-
-        // Clear UART interrupt flag
-        if UART_TX_QUEUE.peek_byte().is_none() {
-            pac::NVIC::mask(hal::pac::Interrupt::UART0_IRQ);
         }
     }
 
