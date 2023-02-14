@@ -146,13 +146,16 @@ fn main() -> ! {
     loop {
         write!(&UART_TX_QUEUE, " ").unwrap();
         if UART_RX_QUEUE.peek_byte().is_some() {
-            hue += 10.0;
-            if hue > 360.0 {
-                hue -= 360.0
-            };
+            let recv_char = UART_RX_QUEUE.read_byte().unwrap() as char;
 
-            let _ = UART_RX_QUEUE.read_byte();
-            writeln!(&UART_TX_QUEUE, "Hue is now {hue}").unwrap();
+            if matches!(recv_char, 'A'..='Z' | 'a'..='z' | '0'..='9') {
+                hue += 5.0;
+                if hue > 360.0 {
+                    hue -= 360.0
+                };
+
+                writeln!(&UART_TX_QUEUE, "Hue is now {hue}").unwrap();
+            }
         }
 
         for (_i, led) in leds.iter_mut().enumerate() {
