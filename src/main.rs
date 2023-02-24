@@ -42,7 +42,7 @@ struct UartQueue {
     interrupt: pac::Interrupt,
 }
 
-const STRIP_LEN: usize = 8;
+const STRIP_LEN: usize = 16;
 
 static GLOBAL_UART: Mutex<RefCell<Option<Uart>>> = Mutex::new(RefCell::new(None));
 static UART_TX_QUEUE: UartQueue = UartQueue {
