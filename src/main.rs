@@ -139,7 +139,8 @@ fn main() -> ! {
     let strip_brightness = 128u8; // Limit brightness to 128/256 (50%)
 
     // Slow down timer by this factor (0.1 will result in 10 seconds):
-    let animation_speed = 0.2;
+    let animation_speed = 1.0;
+    let mut led_toggle = 0;
 
     let mut hue: f32 = 215.0;
 
@@ -158,14 +159,14 @@ fn main() -> ! {
             }
         }
 
-        for (_i, led) in leds.iter_mut().enumerate() {
-            let sin_11 = sin(t * 12.0 * core::f32::consts::PI);
+        for (i, led) in leds.iter_mut().enumerate() {
+            let sin_11 = sin(t * 2.0 * core::f32::consts::PI);
             // Bring -1..1 sine range to 0..1 range:
             let sin_01 = (sin_11 + 1.0) * 0.5;
 
             //hue = 215_f32;
             let sat = 1.0;
-            let val = sin_01;
+            let val = if i % 2 == led_toggle { 0.0 } else { sin_01 };
 
             let rgb = hsv2rgb_u8(hue, sat, val);
             *led = rgb.into();
@@ -180,6 +181,12 @@ fn main() -> ! {
         t += (16_f32 / 1000_f32) * animation_speed;
         while t > 1.0 {
             t -= 1.0;
+
+            if led_toggle == 1 {
+                led_toggle = 0;
+            } else {
+                led_toggle = 1;
+            }
         }
     }
 }
