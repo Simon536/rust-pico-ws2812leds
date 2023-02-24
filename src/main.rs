@@ -159,7 +159,7 @@ fn main() -> ! {
         }
 
         for (_i, led) in leds.iter_mut().enumerate() {
-            let sin_11 = sin(t * 2.0 * core::f32::consts::PI);
+            let sin_11 = sin(t * 12.0 * core::f32::consts::PI);
             // Bring -1..1 sine range to 0..1 range:
             let sin_01 = (sin_11 + 1.0) * 0.5;
 
